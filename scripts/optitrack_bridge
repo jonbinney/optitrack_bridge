@@ -1,0 +1,180 @@
+#!/usr/bin/env python
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+import socket
+import select
+import struct
+import threading
+import rospy
+from geometry_msgs.msg import TransformStamped, Vector3, Quaternion
+from tf.msg import tfMessage
+import diagnostic_msgs.msg
+
+
+class OptitrackBridge(threading.Thread):
+
+    def __init__(self, mcast_group='239.255.42.99', mcast_port=1511):
+        threading.Thread.__init__(self)
+        time_init = rospy.Time.now()
+        self._list_lock = threading.Lock()
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind((mcast_group, mcast_port))
+        mreq = struct.pack("4sl", socket.inet_aton(mcast_group), socket.INADDR_ANY)
+        self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        self._sock.setblocking(0)
+        self._tf_pub = rospy.Publisher('tf', tfMessage, queue_size=100)
+        # Diagnostics
+        self._time_last_msg_pub = None
+        self._max_time_gap = rospy.get_param('~max_time_gap', 0.01)
+        self._window_size = rospy.get_param('~window_size', 10)
+        self._diagnostics_pub = rospy.Publisher('diagnostics', diagnostic_msgs.msg.DiagnosticArray, queue_size=3)
+        rospy.Timer(rospy.Duration(0.5), self._check_optitrack_publishing)
+        with self._list_lock:
+            self._received_time_list = [time_init for i in xrange(self._window_size)]
+
+    def run(self):
+        while not rospy.is_shutdown():
+            readable, writable, errored = select.select([self._sock], [], [], 0.1)
+            if self._sock in errored:
+                # Something bad has happened
+                rospy.logerr('Error reading from socket')
+            if not self._sock in readable:
+                # No data from optitrack yet; just keep looping
+                continue
+
+            packet_str = self._sock.recv(1000000)
+            self.handle_packet(packet_str)
+
+    def handle_packet(self, packet_str):
+        byte_i = 0
+        (i_message, n_data_bytes) = struct.unpack('HH', packet_str[byte_i:byte_i+4])
+        byte_i += 4
+        if i_message == 7:  # frame of mocap data packet
+            (frame_number, n_marker_sets) = struct.unpack('ii', packet_str[byte_i:byte_i+8])
+            byte_i += 8
+
+            marker_ids = []
+            for marker_set_i in range(n_marker_sets):
+                # Name as C string (ends in 0 byte)
+                name_length = packet_str[byte_i:].find('\00')
+                name = packet_str[byte_i:byte_i+name_length]
+                marker_ids.append(name)
+                byte_i += name_length
+                byte_i += 1
+
+                (n_markers,) = struct.unpack('i', packet_str[byte_i:byte_i+4])
+                byte_i += 4
+
+                for marker_i in range(n_markers):
+                    (x, y, z) = struct.unpack('fff', packet_str[byte_i:byte_i+12])
+                    byte_i += 12
+
+            (n_unidentified_markers,) = struct.unpack('i', packet_str[byte_i:byte_i+4])
+            byte_i += 4
+            rospy.logdebug('%d unidentified markers' % (n_unidentified_markers,))
+            for marker_i in range(n_unidentified_markers):
+                (x, y, z) = struct.unpack('fff', packet_str[byte_i:byte_i+12])
+                byte_i += 12
+
+            (n_rigid_bodies,) = struct.unpack('i', packet_str[byte_i:byte_i+4])
+            byte_i += 4
+            rospy.logdebug('%d rigid bodies' % (n_rigid_bodies,))
+            tf_message = tfMessage()
+            for body_i in range(n_rigid_bodies):
+                (idnum, x, y, z, qx, qy, qz, qw,) = struct.unpack('ifffffff', packet_str[byte_i:byte_i+32])
+                rigid_body_name = marker_ids[body_i]
+                byte_i += 32
+
+                (n_markers,) = struct.unpack('i', packet_str[byte_i:byte_i+4])
+                if n_markers > 100 or n_markers < 0:
+                    rospy.logerr('Bad number of packets (%d), probably a parse error' % n_markers)
+                    return
+                byte_i += 4
+                # Skip marker positions
+                byte_i += n_markers * 3 * 4  # x, y, z floats for each marker
+                # Skip marker ids
+                this_body_marker_ids = []
+                for marker_i in range(n_markers):
+                    (marker_idnum,) = struct.unpack('i', packet_str[byte_i:byte_i+4])
+                    this_body_marker_ids.append(marker_idnum)
+                    byte_i += 4
+                # Skip marker sizes
+                byte_i += n_markers * 4
+                # Skip mean marker error
+                (mean_marker_error,) = struct.unpack('f', packet_str[byte_i:byte_i+4])
+                byte_i += 4
+
+                # Valid flag for rigid body
+                (valid_flag,) = struct.unpack('h',packet_str[byte_i:byte_i+2])
+                byte_i += 2
+                if valid_flag == 0:
+                    continue
+
+                # Normalize quaternion
+                qlen = (qx*qx + qy*qy + qz*qz + qw*qw)**0.5
+                (qx, qy, qz, qw) = (qx / qlen, qy / qlen, qz / qlen, qw / qlen)
+
+                transform = TransformStamped()
+                transform.header.stamp = rospy.Time.now()
+                transform.header.frame_id = 'map'
+                transform.child_frame_id = rigid_body_name
+                transform.transform.translation = Vector3(x, y, z)
+                transform.transform.rotation = Quaternion(qx, qy, qz, qw)
+                tf_message.transforms.append(transform)
+
+            # Update the last time publish msg
+            time_now = rospy.Time.now()
+            self._time_last_msg_pub = time_now
+            with self._list_lock:
+                self._received_time_list.append(time_now)
+                self._received_time_list = self._received_time_list[-self._window_size:]
+            self._tf_pub.publish(tf_message)
+
+    def _check_optitrack_publishing(self, event):
+        '''
+        Check Optitrack data publishing time gap
+        '''
+        time_now = rospy.Time.now()
+        opti_diagnostic_array = diagnostic_msgs.msg.DiagnosticArray()
+        opti_diagnostic_status = diagnostic_msgs.msg.DiagnosticStatus()
+        opti_diagnostic_array.header.stamp = time_now
+        if self._time_last_msg_pub is None:
+            opti_diagnostic_status.level = diagnostic_msgs.msg.DiagnosticStatus.ERROR
+            opti_diagnostic_status.name = 'Optitrack external pose'
+            opti_diagnostic_status.message = 'Waiting for first message'
+            opti_diagnostic_status.hardware_id = '1'
+            opti_diagnostic_array.status = [opti_diagnostic_status]
+            self._diagnostics_pub.publish(opti_diagnostic_array)
+            return
+        with self._list_lock:
+            time_gap = (time_now - self._received_time_list[0]).to_sec() / self._window_size
+        if time_gap > self._max_time_gap:
+            opti_diagnostic_status.level = diagnostic_msgs.msg.DiagnosticStatus.ERROR
+            opti_diagnostic_status.name = 'Optitrack external pose'
+            opti_diagnostic_status.message = 'Optitrack publishing too slow, the time gap is %f' % time_gap
+            opti_diagnostic_status.hardware_id = '1'
+            opti_diagnostic_array.status = [opti_diagnostic_status]
+        else:
+            opti_diagnostic_status.level = diagnostic_msgs.msg.DiagnosticStatus.OK
+            opti_diagnostic_status.name = 'Optitrack external pose'
+            opti_diagnostic_status.message = 'Optitrack publishing works well, the time gap is %f' % time_gap
+            opti_diagnostic_status.hardware_id = '1'
+            opti_diagnostic_array.status = [opti_diagnostic_status]
+        self._diagnostics_pub.publish(opti_diagnostic_array)
+
+if __name__ == '__main__':
+    rospy.init_node('optitrack')
+    bridge = OptitrackBridge()
+    bridge.start()
+    rospy.spin()
