@@ -4,7 +4,7 @@
   <version>0.1.0</version>
   <description>Node that bridges between optitrack motion capture and ROS TF</description>
 
-  <maintainer email="jon.binney@aevena.com">Jon Binney</maintainer>
+  <maintainer email="jon.binney@gmail.com">Jon Binney</maintainer>
   <author>Xiaoxiang Hu</author>
 
   <license>Apache License 2.0</license>
