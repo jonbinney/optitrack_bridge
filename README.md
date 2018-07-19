@@ -1,8 +1,8 @@
-# optirack_bridge
+# optitrack_bridge
 
 ROS node optitrack_bridge_node, listen to pose multicasted via UDP by optitrack system, and republish it as ROS messages.
 
-- parameter `address`, mutlicast address for optitrack system, default to `239.255.42.99`
+- parameter `address`, multicast address for optitrack system, default to `239.255.42.99`
 - parameter `port`, multicast address for optitrack system, default to `1511`
 - parameter `body_name`, name of rigid body published by optitrack, default to `base_link`
 - parameter `body_frame_id`, frame_id of rigid body published to ROS, default to the name from optitrack
