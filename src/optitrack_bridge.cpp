@@ -95,8 +95,8 @@ struct RigidBody
 	float x, y, z;
 	float qx, qy, qz, qw;
 
-	int32_t num_markers;
-	Point markers[0];
+//	int32_t num_markers;
+//	Point markers[0];
 } __attribute__((packed));
 
 struct LabelledMarker
@@ -262,19 +262,20 @@ void OptitrackBridge::HandlePacket(const void* buffer, int len)
 
 			const char* rigid_body_name = marker_ids[i];
 
-			if (rigid_body->num_markers > 100 || rigid_body->num_markers < 0)
+			/*if (rigid_body->num_markers > 100 || rigid_body->num_markers < 0)
 			{
 			     ROS_ERROR("Bad number of markers, probably a parse error");
+                 ROS_ERROR_STREAM(rigid_body_name << " " << rigid_body->num_markers);
 			     return;
-			}
+			}*/
 
 			Skip(buf_ptr, sizeof(RigidBody));
 			// skip marker positions
-			Skip(buf_ptr, sizeof(Point) * rigid_body->num_markers);
+			//Skip(buf_ptr, sizeof(Point) * rigid_body->num_markers);
 			// skip marker ids
-			Skip(buf_ptr, sizeof(int32_t) * rigid_body->num_markers);
+			//Skip(buf_ptr, sizeof(int32_t) * rigid_body->num_markers);
 			// skip marker sizes
-			Skip(buf_ptr, sizeof(float) * rigid_body->num_markers);
+			//Skip(buf_ptr, sizeof(float) * rigid_body->num_markers);
 
 			float mean_marker_error = Read<float>(buf_ptr);
 			int validity = Read<int16_t>(buf_ptr);
@@ -302,10 +303,10 @@ void OptitrackBridge::HandlePacket(const void* buffer, int len)
 				valid = true;
 			}
 
-//			ROS_INFO("Pose %s, (%f,%f,%f), (%f,%f,%f,%f)",
-//					rigid_body_name,
-//					rigid_body->x, rigid_body->y, rigid_body->z,
-//					rigid_body->qx, rigid_body->qy, rigid_body->qz,rigid_body->qw);
+			ROS_INFO("Pose %s, (%f,%f,%f), (%f,%f,%f,%f)",
+					rigid_body_name,
+					rigid_body->x, rigid_body->y, rigid_body->z,
+					rigid_body->qx, rigid_body->qy, rigid_body->qz,rigid_body->qw);
 		}
 
 		// skip skeletons
